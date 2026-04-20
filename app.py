@@ -3,154 +3,176 @@ import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, db
 import pandas as pd
-from datetime import datetime, time as dt_time
-from collections import Counter
-import pytz  # Timezone साठी
+from datetime import datetime, timedelta, time as dt_time
+import pytz
+import plotly.express as px
 
 # ──────────────────────────────────────────────
-#  CONFIG & TIMEZONE
+# 1. SETUP & MASTER DATABASE
 # ──────────────────────────────────────────────
 IST = pytz.timezone('Asia/Kolkata')
 
+MASTER_STUDENTS = {
+    "101": "Rahul Patil", "102": "Sneha Deshmukh", "103": "Amit Shinde",
+    "104": "Priya Kulkarni", "105": "Vicky More", "106": "Anjali Gadgil", "107": "Sumit Pawar"
+}
+
 TIMETABLE = [
-    (8,  0,  9,  0,  "Mathematics"),
-    (9,  0,  10, 0,  "Physics"),
-    (10, 0,  11, 0,  "Chemistry"),
-    (11, 0,  11, 20, "Break"),
-    (11, 20, 12, 20, "English"),
-    (12, 20, 13, 20, "Biology"),
-    (13, 20, 14, 0,  "Lunch"),
-    (14, 0,  15, 0,  "Computer Sci."),
-    (15, 0,  16, 0,  "History"),
+    (8, 0, 9, 0, "Mathematics"), (9, 0, 10, 0, "Physics"), (10, 0, 11, 0, "Chemistry"),
+    (11, 20, 12, 20, "English"), (12, 20, 13, 20, "Biology"),
+    (14, 0, 15, 0, "Computer Sci."), (15, 0, 16, 0, "History")
 ]
 
-def get_subject_for_time(t: datetime) -> str:
-    if pd.isna(t): return "—"
-    # जर वेळ UTC असेल तर तिला IST मध्ये रूपांतरित करा
-    if t.tzinfo is not None:
-        t = t.astimezone(IST)
-    ct = dt_time(t.hour, t.minute)
-    for sh, sm, eh, em, subject in TIMETABLE:
-        if dt_time(sh, sm) <= ct < dt_time(eh, em):
-            return subject
-    return "—"
-
-def get_current_subject() -> tuple:
-    now = datetime.now(IST)
-    ct  = dt_time(now.hour, now.minute)
-    for sh, sm, eh, em, subject in TIMETABLE:
-        if dt_time(sh, sm) <= ct < dt_time(eh, em):
-            return subject, f"{sh:02d}:{sm:02d} – {eh:02d}:{em:02d}"
-    return "No Class", "Outside schedule"
-
-# ──────────────────────────────────────────────
-#  Firebase Init
-# ──────────────────────────────────────────────
 @st.cache_resource
 def init_firebase():
     if not firebase_admin._apps:
-        cred_dict = dict(st.secrets["firebase"])
-        cred = credentials.Certificate(cred_dict)
-        firebase_admin.initialize_app(cred, {
-            "databaseURL": "https://attendance-e4940-default-rtdb.firebaseio.com/"
-        })
-init_firebase()
+        try:
+            cred_dict = dict(st.secrets["firebase"])
+            cred = credentials.Certificate(cred_dict)
+            firebase_admin.initialize_app(cred, {
+                "databaseURL": "https://attendance-e4940-default-rtdb.firebaseio.com/"
+            })
+            return True
+        except Exception as e:
+            st.error(f"Firebase Error: {e}")
+            return False
+    return True
 
 # ──────────────────────────────────────────────
-#  Page Config & CSS (Same as yours)
+# 2. HELPER FUNCTIONS
 # ──────────────────────────────────────────────
-st.set_page_config(page_title="RFID Live Attendance", page_icon="📡", layout="wide")
+def get_ist_now(): return datetime.now(IST)
+
+def get_greeting():
+    h = get_ist_now().hour
+    if h < 12: return "Good Morning ☀️", "Fresh start for a new day!"
+    elif 12 <= h < 17: return "Good Afternoon 🌤️", "Mid-day energy check!"
+    else: return "Good Evening 🌆", "Wrapping up the day's work."
+
+def get_subject_for_time(t):
+    if pd.isna(t): return "Free Period"
+    ct = dt_time(t.hour, t.minute)
+    for sh, sm, eh, em, subject in TIMETABLE:
+        if dt_time(sh, sm) <= ct < dt_time(eh, em): return subject
+    return "No Lecture"
+
+def fetch_data():
+    try:
+        ref = db.reference("attendance")
+        data = ref.get()
+        if not data: return pd.DataFrame()
+        df = pd.DataFrame(list(data.values()) if isinstance(data, dict) else data)
+        if not df.empty and "time" in df.columns:
+            df["time"] = pd.to_datetime(df["time"], errors="coerce")
+            df["time"] = df["time"].dt.tz_localize('UTC').dt.tz_convert(IST)
+            df["Subject"] = df["time"].apply(get_subject_for_time)
+            df = df.sort_values("time", ascending=False).reset_index(drop=True)
+        return df
+    except: return pd.DataFrame()
+
+# ──────────────────────────────────────────────
+# 3. UI CONFIG
+# ──────────────────────────────────────────────
+st.set_page_config(page_title="RFID Smart Pro", layout="wide")
+init_firebase()
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap');
-html, body, [class*="css"] { font-family: 'DM Sans', sans-serif !important; background-color: #0a0c0f !important; color: #e8ecf4 !important; }
-.stApp { background-color: #0a0c0f !important; }
-.rfid-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 32px; background: #111318; border-bottom: 1px solid #222730; position: relative; overflow: hidden; margin-bottom: 24px; }
-.live-pill { display: flex; align-items: center; gap: 7px; background: rgba(0,229,160,.1); border: 1px solid rgba(0,229,160,.25); border-radius: 99px; padding: 5px 14px; font-size: 12px; font-weight: 500; color: #00e5a0; font-family: 'Space Mono', monospace; }
-.live-dot { width: 7px; height: 7px; border-radius: 50%; background: #00e5a0; animation: pulse 1.4s ease-in-out infinite; }
-@keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(0,229,160,.4); } 50% { box-shadow: 0 0 0 5px rgba(0,229,160,0); } }
-.stat-card { background: #111318; border: 1px solid #222730; border-radius: 14px; padding: 18px 20px; min-height: 110px; }
-.sv-green { color: #00e5a0; } .sv-blue { color: #00aaff; } .sv-purple { color: #a78bfa; } .sv-red { color: #ff4d6d; }
-.stat-value { font-family: 'Space Mono', monospace; font-size: 26px; font-weight: 700; }
-.last-scan-banner { margin: 0 32px 20px; border-radius: 12px; background: rgba(0,229,160,.06); border: 1px solid rgba(0,229,160,.2); padding: 12px 18px; display: flex; align-items: center; gap: 14px; }
-.subject-fill { height: 100%; border-radius: 4px; background: #a78bfa; }
-.subject-track { flex: 1; height: 8px; background: #181c22; border-radius: 4px; overflow: hidden; }
+    .stApp { background-color: #0f172a; color: #f8fafc; }
+    .header-box {
+        background: rgba(30, 41, 59, 0.8); backdrop-filter: blur(10px);
+        padding: 20px; border-radius: 15px; border-left: 5px solid #3b82f6;
+        display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px;
+    }
+    .live-dot { height: 10px; width: 10px; background-color: #10b981; border-radius: 50%; display: inline-block; animation: blink 1.2s infinite; }
+    @keyframes blink { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
 </style>
 """, unsafe_allow_html=True)
 
-# ──────────────────────────────────────────────
-#  Helper Functions
-# ──────────────────────────────────────────────
-def fetch_data() -> pd.DataFrame:
-    ref = db.reference("attendance")
-    data = ref.get()
-    if not data: return pd.DataFrame()
-    records = list(data.values()) if isinstance(data, dict) else data
-    df = pd.DataFrame(records)
-    if "time" in df.columns:
-        # Firebase कडून येणारी वेळ UTC असू शकते, तिला timezone-aware करा
-        df["time"] = pd.to_datetime(df["time"], errors="coerce")
-        if df["time"].dt.tz is None:
-            df["time"] = df["time"].dt.tz_localize('UTC').dt.tz_convert(IST)
-        else:
-            df["time"] = df["time"].dt.tz_convert(IST)
-        df = df.sort_values("time", ascending=False).reset_index(drop=True)
-    return df
-
-def compute_metrics(df: pd.DataFrame, expected: int) -> dict:
-    if df.empty: return dict(total=0, unique=0, absent=expected, subject_dist={})
-    uid_col = "uid" if "uid" in df.columns else ("name" if "name" in df.columns else None)
-    unique = df[uid_col].nunique() if uid_col else len(df)
-    subjects = df["time"].apply(get_subject_for_time)
-    dist = dict(Counter(subjects))
-    dist.pop("—", None)
-    return dict(total=len(df), unique=unique, absent=max(0, expected-unique), subject_dist=dist)
-
-# --- HTML UI Components ---
-def header_html(time_str):
-    return f'<div class="rfid-header"><div class="brand"><div class="brand-name">RFID Attendance</div><div class="brand-sub">LIVE IST SYSTEM</div></div><div class="hdr-right"><div class="clock-chip" style="color:#5a6278; font-family:monospace; margin-right:15px;">{time_str}</div><div class="live-pill"><div class="live-dot"></div>LIVE</div></div></div>'
-
-def stat_card_html(label, value, css_class, sub):
-    return f'<div class="stat-card"><div style="font-size:10px; color:#5a6278;">{label}</div><div class="stat-value {css_class}">{value}</div><div style="font-size:11px; color:#5a6278;">{sub}</div></div>'
-
-# ──────────────────────────────────────────────
-#  Main Execution
-# ──────────────────────────────────────────────
-if "expected" not in st.session_state: st.session_state.expected = 30
-
 with st.sidebar:
-    st.markdown("### ⚙️ Settings")
-    st.session_state.expected = st.number_input("Expected count", value=st.session_state.expected)
-    refresh_int = st.slider("Refresh (sec)", 2, 30, 5)
+    st.title("🛡️ Admin Panel")
+    app_mode = st.selectbox("Navigation", ["Live Dashboard", "Absentee Tracker", "Timetable"])
+    refresh_rate = st.slider("Update Frequency (sec)", 2, 15, 5)
 
-placeholder = st.empty()
-
-while True:
-    df = fetch_data()
-    metrics = compute_metrics(df, st.session_state.expected)
-    now_str = datetime.now(IST).strftime("%I:%M:%S %p") # IST Time
-    curr_subj, curr_range = get_current_subject()
-    
-    with placeholder.container():
-        st.markdown(header_html(now_str), unsafe_allow_html=True)
+# ──────────────────────────────────────────────
+# 4. MAIN DASHBOARD
+# ──────────────────────────────────────────────
+if app_mode == "Live Dashboard":
+    placeholder = st.empty()
+    while True:
+        df = fetch_data()
+        now = get_ist_now()
+        greet_t, greet_m = get_greeting()
         
-        c1, c2, c3, c4 = st.columns(4)
-        c1.markdown(stat_card_html("TOTAL SCANS", metrics["total"], "sv-green", "All history"), unsafe_allow_html=True)
-        c2.markdown(stat_card_html("UNIQUE PRESENT", metrics["unique"], "sv-blue", "Today"), unsafe_allow_html=True)
-        c3.markdown(stat_card_html("CURRENT SUBJECT", curr_subj, "sv-purple", curr_range), unsafe_allow_html=True)
-        c4.markdown(stat_card_html("ABSENT", metrics["absent"], "sv-red", f"Target: {st.session_state.expected}"), unsafe_allow_html=True)
+        present_uids = df["uid"].unique() if not df.empty and "uid" in df.columns else []
+        total_enrolled = len(MASTER_STUDENTS)
+        absent_count = total_enrolled - len(present_uids)
 
-        if not df.empty:
-            latest = df.iloc[0]
-            st.markdown(f'<div class="last-scan-banner"><div class="live-dot"></div><div><div style="font-size:10px; color:#00e5a0;">LATEST SCAN</div><div style="font-weight:600;">{latest.get("name", latest.get("uid"))}</div></div><div style="margin-left:auto; font-family:monospace;">{latest["time"].strftime("%H:%M:%S")}</div></div>', unsafe_allow_html=True)
+        with placeholder.container():
+            # Header
+            st.markdown(f"""
+            <div class="header-box">
+                <div><h2 style='margin:0;'>{greet_t}</h2><p style='margin:0; opacity:0.7;'>{greet_m}</p></div>
+                <div style='text-align: right;'><h2 style='margin:0; font-family: monospace;'>{now.strftime('%I:%M:%S %p')}</h2>
+                <p style='margin:0;'><span class="live-dot"></span> ANALYTICS LIVE</p></div>
+            </div>
+            """, unsafe_allow_html=True)
 
-        st.markdown("### Live Feed")
-        if not df.empty:
-            display_df = df.copy()
-            display_df["Time"] = display_df["time"].dt.strftime("%H:%M:%S")
-            st.dataframe(display_df[["name", "uid", "Time"]].head(10), use_container_width=True)
-        else:
-            st.write("No data found.")
+            # Metrics Row
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Current Lecture", get_subject_for_time(now))
+            m2.metric("Total Present", f"{len(present_uids)} / {total_enrolled}")
+            m3.metric("Total Absent", absent_count)
+            attend_per = (len(present_uids)/total_enrolled)*100
+            m4.metric("Attendance %", f"{attend_per:.1f}%")
 
-    time.sleep(refresh_int)
+            st.markdown("---")
+
+            # Analytics Section
+            col_left, col_right = st.columns([2, 1])
+
+            with col_left:
+                st.subheader("📈 Hourly Scanning Trend")
+                if not df.empty:
+                    # तासानुसार डेटा ग्रुप करा
+                    df['hour'] = df['time'].dt.hour
+                    hourly_data = df.groupby('hour').size().reset_index(name='Scans')
+                    fig = px.area(hourly_data, x='hour', y='Scans', color_discrete_sequence=['#3b82f6'])
+                    fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_color="white", height=300)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No data available for trend analysis.")
+
+            with col_right:
+                st.subheader("📊 Distribution")
+                fig_pie = px.pie(values=[len(present_uids), absent_count], names=['Present', 'Absent'], 
+                                 color_discrete_sequence=['#10b981', '#ef4444'], hole=0.5)
+                fig_pie.update_layout(showlegend=False, paper_bgcolor='rgba(0,0,0,0)', font_color="white", height=300, margin=dict(t=0, b=0, l=0, r=0))
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+            # Latest Scan Highlight
+            st.markdown("---")
+            if not df.empty:
+                latest = df.iloc[0]
+                st.info(f"🚀 **Latest Activity:** {latest.get('name', 'Unknown')} scanned for **{latest.get('Subject', 'N/A')}** at {latest['time'].strftime('%I:%M %p')}")
+
+        time.sleep(refresh_rate)
+
+elif app_mode == "Absentee Tracker":
+    # (आधीचा Absentee Tracker कोड)
+    st.header("🕵️ Absentee Tracker")
+    df_main = fetch_data()
+    present_uids = set(df_main["uid"].unique().astype(str)) if not df_main.empty and "uid" in df_main.columns else set()
+    absent_uids = set(MASTER_STUDENTS.keys()) - present_uids
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("❌ Absent Students")
+        for u in absent_uids: st.error(f"{MASTER_STUDENTS[u]} ({u})")
+    with c2:
+        st.subheader("✅ Present Students")
+        for u in present_uids: st.success(f"{MASTER_STUDENTS.get(u, 'Guest')} ({u})")
+
+elif app_mode == "Timetable":
+    st.header("📅 Schedule")
+    st.table(pd.DataFrame([f"{s[0]:02d}:{s[1]:02d}-{s[2]:02d}:{s[3]:02d} | {s[4]}" for s in TIMETABLE], columns=["Schedule"]))
